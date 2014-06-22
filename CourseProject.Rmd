@@ -1,0 +1,136 @@
+---
+title: "Predicting Correct Exercise Performance using the HAR Dataset"
+output: html_document
+---
+
+##Data Loading and Preprocessing
+First I downloaded the project data and loaded it into R.
+```{r cached=TRUE}
+tr_url <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+tst_url <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv'
+trfname <- 'pml-training.csv'
+tstfname <- 'pml-testing.csv'
+setwd('E:/Coursera/Practical Machine Learning')
+
+if (!trfname %in% dir()) {
+    download.file(tr_url, trfname)
+}
+if (!tstfname %in% dir()) {
+    download.file(tst_url, tstfname)
+}
+
+training <- read.csv(trfname)
+testing <- read.csv(tstfname)
+```
+
+```{r}
+dim(training)
+```
+```{r, results='hide'}
+head(training)
+```
+
+Variables that are primarily NA or blank provide little information, so I eliminated those.
+
+```{r}
+nas <- sapply(training, is.na)
+num_nas <- colSums(nas)
+# Every variable has either 0 or 19216 NAs in it.
+na_vars <- names(num_nas)[num_nas==19216]
+trim <- training[, !names(training) %in% na_vars]
+```
+After getting rid of NAs, I did the same for blanks.
+```{r}
+blanks <- sapply(trim, function(x){sum(x=='')})
+blank_vars <- names(blanks)[blanks==19216]
+trim <- trim[, !names(trim) %in% blank_vars]
+```
+
+`r sum(num_nas==19216)` variables were mostly NA, `r sum(blanks==19216)` were mostly blank.
+
+X is just an index and user\_name is not of interest.  I deliberated over the timestamp and window variables.  Was the sequence of observations important, or could I treat each observation as independent?  For simplicity I decided to treat them as the latter first, and see how I did; therefore I removed the first 7 variables from consideration.
+
+```{r}
+trim <- trim[, -seq(1:7)]
+```
+
+This left me 52 variables to predict on.
+
+##Model Building - A Random Forest
+
+```{r}
+set.seed(1)
+choose_big <- sample(1:nrow(trim), 10000, replace=F)
+```
+
+The algorithm I decided to use was random forest, for its predictive accuracy, its simplicity to implement using the caret package, and because I wanted to work more with random forests.
+
+I used trainControl to do repeated cross validation.  I kept the default of 10 folds, repeated 5 times.  I specified a tuneLength of 5, to try 5 different mtry values (the tuning parameter for random forests).  Just in case I ended up with a fold with few of one class, I used Kappa rather than Accuracy as a metric.  As an additional bit of cross-validation (but mostly to save computation time), I trained on only about half the training data, using 10000 of the `r nrow(trim)` observations.
+
+```{r, results='hide', warning=FALSE, message=FALSE}
+library(caret)
+```
+```{r cache=TRUE, results='hide', warning=FALSE, message=FALSE}
+fit1 <- train(classe ~ ., data=trim[choose_big, ], method='rf', tuneLength = 5,
+    trControl=trainControl(method="repeatedcv", repeats=5, verboseIter=F), metric="Kappa")
+```
+
+```{r}
+fit1$finalModel
+```
+
+##Estimating Out-of-Sample Error
+
+Random forests have a handy intrinsic feature in that they internally estimate out-of-sample error as out-of-bag error - each tree is trained on only a subsample of the training data.  The rest of the data is used to compute the out-of-bag error.
+
+The final model shows the out-of-bag error is estimated as 0.91%.
+
+```{r}
+confusionMatrix(predict(fit1$finalModel, newdata=trim[-choose_big, ]), trim[-choose_big, ]$classe)
+```
+
+As a quick sanity check, running a prediction on the out of sample training data yields an accuracy of 99.19%.  Pretty close - an out of sample error rate of less than 1%.
+
+##Looking at More of the Model
+
+The final mtry value (the number of variables randomly sampled to include at each split) was `r fit1$finalModel$mtry`.
+
+The other mtry values and their results can be seen with:
+
+```{r}
+fit1$results
+```
+
+From 2 to 52 variables, all were close.  Of interest is that only 2 variables yielded a better accuracy than all 52.  In this case, using Kappa as a selector over Accuracy was not an issue.
+
+The most important variables were:
+
+```{r}
+varImp(fit1)
+```
+
+#Prediction
+
+Finally, I ran a prediction on the test data.
+
+```{r}
+test <- testing[, !names(testing) %in% na_vars]
+test <- test[, !names(test) %in% blank_vars]
+test <- test[, -seq(1:7)]
+answers <- as.character(predict(fit1$finalModel, newdata=test[, -53]))
+answers
+```
+
+Those answers were then each written out to its own separate file for submission, with perfect results.
+
+```{r}
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(answers)
+```
